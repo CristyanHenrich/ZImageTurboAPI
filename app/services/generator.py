@@ -98,14 +98,14 @@ class FluxGenerator:
             else "mps" if torch.backends.mps.is_available()
             else "cpu"
         )
-        self.repo_id = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.2-dev")
+        self.repo_id = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-schnell")
         self.remote_text_encoder_url = os.getenv(
             "FLUX_REMOTE_ENCODER",
             "https://remote-text-encoder-flux-2.huggingface.co/predict",
         )
 
         self.torch_dtype = (
-            torch.bfloat16
+            torch.float16
             if self.device.startswith("cuda")
             else torch.float16
             if self.device == "mps"
@@ -127,13 +127,20 @@ class FluxGenerator:
             return self._pipe
 
         token = self._ensure_token()
-        self._pipe = Flux2Pipeline.from_pretrained(
+        pipe = Flux2Pipeline.from_pretrained(
             self.repo_id,
             text_encoder=None,
             torch_dtype=self.torch_dtype,
             token=token,
         )
-        self._pipe.to(self.device)
+        pipe.to(self.device)
+
+        if self.device.startswith("cuda"):
+            pipe.enable_sequential_cpu_offload()
+        elif self.device == "mps":
+            pipe.enable_model_cpu_offload()
+
+        self._pipe = pipe
         return self._pipe
 
     def _remote_text_encoder(self, prompt: str) -> torch.Tensor:
@@ -180,7 +187,16 @@ class FluxGenerator:
         if image_bytes:
             call_kwargs["image"] = [self._prepare_image(image_bytes)]
 
-        image = pipe(**call_kwargs).images[0]
+        try:
+            with torch.inference_mode():
+                image = pipe(**call_kwargs).images[0]
+        except RuntimeError as err:
+            message = str(err).lower()
+            if "out of memory" in message:
+                logger.warning("FLUX generation OOM (%s); clearing cache and re-raising", message)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            raise
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
