@@ -24,6 +24,7 @@ class MinioStorage:
         self.access_key = os.getenv("MINIO_ACCESS_KEY")
         self.secret_key = os.getenv("MINIO_SECRET_KEY")
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
+        self._bucket_checked = False
 
         secure = str(self.minio_url).startswith("https")
 
@@ -35,7 +36,6 @@ class MinioStorage:
                 secure=secure,
             )
             MinioStorage._bucket = self.bucket_name
-            self._ensure_bucket_exists()
 
     @staticmethod
     def _extract_endpoint(url: str) -> str:
@@ -45,11 +45,14 @@ class MinioStorage:
 
     def _ensure_bucket_exists(self):
         try:
+            if self._bucket_checked:
+                return
             if not MinioStorage._client.bucket_exists(self.bucket_name):
                 MinioStorage._client.make_bucket(self.bucket_name)
                 logger.info(f"Bucket criado: {self.bucket_name}")
             else:
                 logger.info(f"Bucket já existe: {self.bucket_name}")
+            self._bucket_checked = True
         except S3Error as err:
             logger.error(f"Erro ao garantir bucket: {err}")
             raise err
@@ -71,6 +74,8 @@ class MinioStorage:
         Faz upload robusto de uma imagem (BytesIO) com retries,
         logs e URL formatada como no exemplo anterior.
         """
+        self._ensure_bucket_exists()
+
         if not isinstance(image_data, io.BytesIO):
             raise ValueError("image_data deve ser um BytesIO")
 
