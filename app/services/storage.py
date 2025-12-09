@@ -9,17 +9,16 @@ load_dotenv()
 
 class MinioStorage:
     def __init__(self):
-        self.minio_url = os.getenv("MINIO_URL", "").replace("https://", "").replace("http://", "")
-        self.endpoint = os.getenv("MINIO_ENDPOINT", "s3.amazonaws.com").replace("https://", "").replace("http://", "") # Adjust for library compatibility if needed, but usually just hostname:port
+        self.minio_url = os.getenv("MINIO_URL")
+        self.endpoint = os.getenv("MINIO_ENDPOINT")
         self.access_key = os.getenv("MINIO_ACCESS_KEY")
         self.secret_key = os.getenv("MINIO_SECRET_KEY")
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
         
-        # Determine secure connection
         secure = os.getenv("MINIO_URL", "").startswith("https")
 
         self.client = Minio(
-            self.minio_url,
+            self.endpoint,
             access_key=self.access_key,
             secret_key=self.secret_key,
             secure=secure
