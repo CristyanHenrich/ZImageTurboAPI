@@ -1,7 +1,9 @@
-import torch
 import io
+
+import torch
 from diffusers import ZImagePipeline
-from storage import MinioStorage
+
+from app.services.storage import storage
 
 
 class ImageGenerator:
@@ -13,7 +15,6 @@ class ImageGenerator:
         )
 
         print(f"Loading model on {self.device}...")
-
         self.pipe = ZImagePipeline.from_pretrained(
             "Tongyi-MAI/Z-Image-Turbo",
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
@@ -25,12 +26,8 @@ class ImageGenerator:
         elif self.device == "mps":
             self.pipe.to("mps")
         else:
-            # otimização para CPU
             self.pipe.enable_model_cpu_offload()
 
-    # -------------------------------------------------------------------------
-    # Gera a imagem somente em memória (BytesIO)
-    # -------------------------------------------------------------------------
     def generate(self, prompt: str) -> io.BytesIO:
         image = self.pipe(
             prompt=prompt,
@@ -46,21 +43,9 @@ class ImageGenerator:
         buffer.seek(0)
         return buffer
 
-    # -------------------------------------------------------------------------
-    # Gera a imagem e faz upload no MinIO usando sua nova classe
-    # -------------------------------------------------------------------------
     def generate_and_upload(self, prompt: str) -> str:
-        """
-        Retorna a URL pública da imagem gerada.
-        """
         img_bytes = self.generate(prompt)
-
-        url = MinioStorage.upload_image(
-            img_bytes,
-            content_type="image/png"
-        )
-
-        return url
+        return storage.upload_image(img_bytes, content_type="image/png")
 
 
 # Instância reutilizável

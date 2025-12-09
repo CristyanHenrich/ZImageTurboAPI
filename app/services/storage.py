@@ -1,12 +1,12 @@
-import os
 import io
-import uuid
-import time
 import logging
+import os
+import time
+import uuid
+
+from dotenv import load_dotenv
 from minio import Minio
 from minio.error import S3Error
-from urllib.parse import urlparse
-from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -37,10 +37,6 @@ class MinioStorage:
             MinioStorage._bucket = self.bucket_name
             self._ensure_bucket_exists()
 
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-
     @staticmethod
     def _extract_endpoint(url: str) -> str:
         if not url:
@@ -69,10 +65,6 @@ class MinioStorage:
 
         # Ex.: https://minio.playground.dev.br/genius/arquivo.png
         return f"{base_url}/{self.bucket_name}/{filename}"
-
-    # -------------------------------------------------------------------------
-    # Upload
-    # -------------------------------------------------------------------------
 
     def upload_image(self, image_data: io.BytesIO, content_type: str = "image/png") -> str:
         """
