@@ -8,6 +8,7 @@ import requests
 import torch
 from diffusers import Flux2Pipeline, ZImagePipeline
 from huggingface_hub import get_token
+from PIL import Image
 
 from app.services.storage import storage
 
@@ -103,18 +104,40 @@ class FluxGenerator:
             "https://remote-text-encoder-flux-2.huggingface.co/predict",
         )
 
-        torch_dtype = torch.bfloat16 if self.device.startswith("cuda") else torch.float32
-        self.pipe = Flux2Pipeline.from_pretrained(
+        self.torch_dtype = (
+            torch.bfloat16
+            if self.device.startswith("cuda")
+            else torch.float16
+            if self.device == "mps"
+            else torch.float32
+        )
+        self._pipe: Optional[Flux2Pipeline] = None
+        self._hf_token = os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN")
+
+    def _ensure_token(self) -> str:
+        token = self._hf_token or get_token()
+        if not token:
+            raise RuntimeError(
+                "Hugging Face token required to access FLUX.2 [dev]. Set HUGGINGFACE_TOKEN or HF_TOKEN."
+            )
+        return token
+
+    def _ensure_pipe(self) -> Flux2Pipeline:
+        if self._pipe is not None:
+            return self._pipe
+
+        token = self._ensure_token()
+        self._pipe = Flux2Pipeline.from_pretrained(
             self.repo_id,
             text_encoder=None,
-            torch_dtype=torch_dtype,
+            torch_dtype=self.torch_dtype,
+            token=token,
         )
-        self.pipe.to(self.device)
+        self._pipe.to(self.device)
+        return self._pipe
 
     def _remote_text_encoder(self, prompt: str) -> torch.Tensor:
-        token = os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN") or get_token()
-        if not token:
-            raise RuntimeError("Hugging Face token required to use FLUX text encoder.")
+        token = self._ensure_token()
 
         response = requests.post(
             self.remote_text_encoder_url,
@@ -131,24 +154,33 @@ class FluxGenerator:
         embeds = torch.load(buffer, map_location=self.device)
         return embeds
 
+    def _prepare_image(self, image_bytes: bytes) -> Image.Image:
+        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
     def generate(
         self,
         prompt: str,
         num_inference_steps: Optional[int] = None,
         guidance_scale: Optional[float] = None,
+        image_bytes: Optional[bytes] = None,
         **_,
     ) -> io.BytesIO:
         num_inference_steps = num_inference_steps or 50
         guidance_scale = 4.0 if guidance_scale is None else guidance_scale
 
+        pipe = self._ensure_pipe()
         prompt_embeds = self._remote_text_encoder(prompt)
 
-        image = self.pipe(
-            prompt_embeds=prompt_embeds,
-            generator=torch.Generator(self.device).manual_seed(42),
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-        ).images[0]
+        call_kwargs = {
+            "prompt_embeds": prompt_embeds,
+            "generator": torch.Generator(self.device).manual_seed(42),
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+        }
+        if image_bytes:
+            call_kwargs["image"] = [self._prepare_image(image_bytes)]
+
+        image = pipe(**call_kwargs).images[0]
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
@@ -166,10 +198,12 @@ class ImageGeneratorManager:
         *,
         model: ModelName,
         prompt: str,
+        image_bytes: Optional[bytes] = None,
         **kwargs,
     ) -> io.BytesIO:
-        generator = self._flux if model == ModelName.FLUX else self._zimage
-        return generator.generate(prompt=prompt, **kwargs)
+        if model == ModelName.FLUX:
+            return self._flux.generate(prompt=prompt, image_bytes=image_bytes, **kwargs)
+        return self._zimage.generate(prompt=prompt, **kwargs)
 
 
 # Instância reutilizável
