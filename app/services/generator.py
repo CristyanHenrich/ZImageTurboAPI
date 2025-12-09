@@ -98,7 +98,7 @@ class FluxGenerator:
             else "mps" if torch.backends.mps.is_available()
             else "cpu"
         )
-        self.repo_id = os.getenv("FLUX_MODEL_ID", "diffusers/FLUX.2-dev")
+        self.repo_id = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.2-dev")
         self.remote_text_encoder_url = os.getenv(
             "FLUX_REMOTE_ENCODER",
             "https://remote-text-encoder-flux-2.huggingface.co/predict",
