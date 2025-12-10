@@ -25,7 +25,7 @@ def _image_to_bytes(image: Image.Image) -> bytes:
 
 class QwenTextGenerator:
     def __init__(self):
-        model_id = os.getenv("QWEN_TEXT_MODEL_ID", "Qwen/Qwen-Image")
+        model_id = os.getenv("QWEN_TEXT_MODEL_ID", "nunchaku-tech/nunchaku-qwen-image")
         dtype_name = os.getenv("QWEN_TEXT_TORCH_DTYPE", "bfloat16").lower()
         torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
@@ -98,7 +98,7 @@ class QwenTextGenerator:
 
 class QwenEditGenerator:
     def __init__(self):
-        model_id = os.getenv("QWEN_EDIT_MODEL_ID", "Qwen/Qwen-Image-Edit")
+        model_id = os.getenv("QWEN_EDIT_MODEL_ID", "nunchaku-tech/nunchaku-qwen-image-edit")
         dtype_name = os.getenv("QWEN_EDIT_TORCH_DTYPE", "bfloat16").lower()
         torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
