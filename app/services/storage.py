@@ -20,8 +20,7 @@ class MinioStorage:
     _retry_delay = 2.0
 
     def __init__(self):
-        self.minio_url = os.getenv("MINIO_URL")
-        self.endpoint = self._extract_endpoint(os.getenv("MINIO_ENDPOINT") or self.minio_url)
+        self.endpoint = self._extract_endpoint(os.getenv("MINIO_URL"))
         self.access_key = os.getenv("MINIO_ACCESS_KEY")
         self.secret_key = os.getenv("MINIO_SECRET_KEY")
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
