@@ -1,226 +1,209 @@
-import io
 import logging
 import os
-from enum import Enum
-from typing import Optional
-
-import requests
-import torch
-from diffusers import Flux2Pipeline, ZImagePipeline
-from huggingface_hub import get_token
-from PIL import Image
-
-from app.services.storage import storage
+import shlex
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 
-class ModelName(str, Enum):
-    ZIMAGE = "zimage"
-    FLUX = "flux"
-
-
-class ZImageGenerator:
+class GGUFFluxGenerator:
     def __init__(self):
-        self.device = (
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        # !! For best speed performance, recommend to use `_flash_3` backend and set `compile=True`.
-        # This would give you sub-second generation speed on Hopper GPUs (H100/H200/H800) after warm-up.
-        self.backend = "_flash_3"
-        self.compile_model = True
+        self.model_path = Path(os.getenv("FLUX_GGUF_MODEL_PATH", "flux2-dev-gguf.Q4_K_M.gguf"))
+        if not self.model_path.exists():
+            raise RuntimeError(
+                "O arquivo GGUF não foi encontrado em "
+                f"'{self.model_path}'. Defina FLUX_GGUF_MODEL_PATH."
+            )
 
-        torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
-        pipe_kwargs = {
-            "torch_dtype": torch_dtype,
-            "low_cpu_mem_usage": True,
-        }
-        if self.compile_model:
-            pipe_kwargs["torch_compile"] = True
-
-        self.pipe = ZImagePipeline.from_pretrained(
-            "Tongyi-MAI/Z-Image-Turbo",
-            **pipe_kwargs,
-        )
-
-        if self.device == "cuda":
-            self.pipe.to("cuda")
-        elif self.device == "mps":
-            self.pipe.to("mps")
+        cli_path = Path(os.getenv("FLUX_GGUF_CLI", "flux2-gguf"))
+        resolved_cli = shutil.which(str(cli_path))
+        if resolved_cli:
+            self.cli = Path(resolved_cli)
+        elif cli_path.exists():
+            self.cli = cli_path
         else:
-            self.pipe.enable_model_cpu_offload()
+            raise RuntimeError(
+                f"CLI GGUF não disponível em '{cli_path}'. "
+                "Instale o runtime (p. ex. ggml/flux2) e defina FLUX_GGUF_CLI."
+            )
+
+        self.device = os.getenv("FLUX_GGUF_DEVICE", "cuda:0")
+        self.default_height = int(os.getenv("FLUX_GGUF_HEIGHT", "1024"))
+        self.default_width = int(os.getenv("FLUX_GGUF_WIDTH", "1024"))
+        self.default_steps = int(os.getenv("FLUX_GGUF_STEPS", "28"))
+        self.default_guidance = float(os.getenv("FLUX_GGUF_GUIDANCE", "4.0"))
+        self.default_strength = float(os.getenv("FLUX_GGUF_STRENGTH", "0.8"))
+        self.max_retries = int(os.getenv("FLUX_GGUF_RETRIES", "2"))
+        self.extra_args = shlex.split(os.getenv("FLUX_GGUF_EXTRA_ARGS", ""))
+
+        self.env = os.environ.copy()
+        cuda_devices = os.getenv("FLUX_GGUF_CUDA_VISIBLE_DEVICES")
+        if cuda_devices:
+            self.env["CUDA_VISIBLE_DEVICES"] = cuda_devices
+
+    def _build_command(
+        self,
+        prompt: str,
+        output_path: Path,
+        height: int,
+        width: int,
+        steps: int,
+        guidance: float,
+        seed: Optional[int],
+        init_image_path: Optional[Path],
+        strength: float,
+    ) -> List[str]:
+        cmd = [
+            str(self.cli),
+            "--model",
+            str(self.model_path),
+            "--prompt",
+            prompt,
+            "--output",
+            str(output_path),
+            "--height",
+            str(height),
+            "--width",
+            str(width),
+            "--steps",
+            str(steps),
+            "--guidance",
+            str(guidance),
+            "--device",
+            self.device,
+        ]
+
+        if seed is not None:
+            cmd.extend(["--seed", str(seed)])
+
+        if init_image_path:
+            cmd.extend(
+                [
+                    "--init-image",
+                    str(init_image_path),
+                    "--strength",
+                    str(strength),
+                ]
+            )
+
+        if self.extra_args:
+            cmd.extend(self.extra_args)
+
+        return cmd
+
+    def _dump_temp_image(self, image_bytes: bytes) -> Path:
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        try:
+            tmp.write(image_bytes)
+            tmp.flush()
+        finally:
+            tmp.close()
+        return Path(tmp.name)
+
+    def _generate_once(
+        self,
+        prompt: str,
+        height: int,
+        width: int,
+        steps: int,
+        guidance: float,
+        seed: Optional[int],
+        init_image: Optional[bytes],
+        strength: float,
+    ) -> bytes:
+        init_path: Optional[Path] = None
+        if init_image:
+            init_path = self._dump_temp_image(init_image)
+
+        out_tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        out_tmp.close()
+        output_path = Path(out_tmp.name)
+
+        last_error: Optional[subprocess.CalledProcessError] = None
+
+        try:
+            for attempt in range(1, self.max_retries + 1):
+                cmd = self._build_command(
+                    prompt=prompt,
+                    output_path=output_path,
+                    height=height,
+                    width=width,
+                    steps=steps,
+                    guidance=guidance,
+                    seed=seed,
+                    init_image_path=init_path,
+                    strength=strength,
+                )
+
+                logger.info("Flux GGUF runner: %s", " ".join(shlex.quote(p) for p in cmd))
+
+                try:
+                    subprocess.run(
+                        cmd,
+                        check=True,
+                        env=self.env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    return output_path.read_bytes()
+                except subprocess.CalledProcessError as err:
+                    last_error = err
+                    logger.warning(
+                        "Tentativa %s/%s falhou: %s",
+                        attempt,
+                        self.max_retries,
+                        err.stderr.strip(),
+                    )
+                    if attempt == self.max_retries:
+                        raise
+        finally:
+            if output_path.exists():
+                output_path.unlink(missing_ok=True)
+            if init_path and init_path.exists():
+                init_path.unlink(missing_ok=True)
+
+        assert last_error is not None  # mypy
+        raise last_error
 
     def generate(
         self,
         prompt: str,
+        n: int = 1,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: Optional[int] = None,
         guidance_scale: Optional[float] = None,
-        backend: Optional[str] = None,
-        compile_model: Optional[bool] = None,
-    ) -> io.BytesIO:
-        height = height or 736
-        width = width or 1024
-        num_inference_steps = num_inference_steps or 9
-        guidance_scale = 0.0 if guidance_scale is None else guidance_scale
-        backend = backend or self.backend
-        compile_model = self.compile_model if compile_model is None else compile_model
+        seed: Optional[int] = None,
+        image_bytes: Optional[bytes] = None,
+        strength: Optional[float] = None,
+    ) -> List[bytes]:
+        height = height or self.default_height
+        width = width or self.default_width
+        steps = num_inference_steps or self.default_steps
+        guidance = guidance_scale or self.default_guidance
+        strength = strength or self.default_strength
 
-        if backend != self.backend or compile_model != self.compile_model:
-            logger.info(
-                "ZImage overridden settings: backend=%s compile=%s",
-                backend,
-                compile_model,
+        results: List[bytes] = []
+        for _ in range(n):
+            results.append(
+                self._generate_once(
+                    prompt=prompt,
+                    height=height,
+                    width=width,
+                    steps=steps,
+                    guidance=guidance,
+                    seed=seed,
+                    init_image=image_bytes,
+                    strength=strength,
+                )
             )
 
-        image = self.pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=torch.Generator(self.device).manual_seed(42),
-        ).images[0]
-
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
-        return buffer
+        return results
 
 
-class FluxGenerator:
-    def __init__(self):
-        self.device = (
-            "cuda" if torch.cuda.is_available()
-            else "mps" if torch.backends.mps.is_available()
-            else "cpu"
-        )
-        self.repo_id = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-schnell")
-        self.remote_text_encoder_url = os.getenv(
-            "FLUX_REMOTE_ENCODER",
-            "https://remote-text-encoder-flux-2.huggingface.co/predict",
-        )
-
-        self.torch_dtype = (
-            torch.float16
-            if self.device.startswith("cuda")
-            else torch.float16
-            if self.device == "mps"
-            else torch.float32
-        )
-        self._pipe: Optional[Flux2Pipeline] = None
-        self._hf_token = os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_TOKEN")
-
-    def _ensure_token(self) -> str:
-        token = self._hf_token or get_token()
-        if not token:
-            raise RuntimeError(
-                "Hugging Face token required to access FLUX.2 [dev]. Set HUGGINGFACE_TOKEN or HF_TOKEN."
-            )
-        return token
-
-    def _ensure_pipe(self) -> Flux2Pipeline:
-        if self._pipe is not None:
-            return self._pipe
-
-        token = self._ensure_token()
-        pipe = Flux2Pipeline.from_pretrained(
-            self.repo_id,
-            text_encoder=None,
-            torch_dtype=self.torch_dtype,
-            token=token,
-        )
-        pipe.to(self.device)
-
-        if self.device.startswith("cuda"):
-            pipe.enable_sequential_cpu_offload()
-        elif self.device == "mps":
-            pipe.enable_model_cpu_offload()
-
-        self._pipe = pipe
-        return self._pipe
-
-    def _remote_text_encoder(self, prompt: str) -> torch.Tensor:
-        token = self._ensure_token()
-
-        response = requests.post(
-            self.remote_text_encoder_url,
-            json={"prompt": prompt},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-
-        buffer = io.BytesIO(response.content)
-        embeds = torch.load(buffer, map_location=self.device)
-        return embeds
-
-    def _prepare_image(self, image_bytes: bytes) -> Image.Image:
-        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-    def generate(
-        self,
-        prompt: str,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        image_bytes: Optional[bytes] = None,
-        **_,
-    ) -> io.BytesIO:
-        num_inference_steps = num_inference_steps or 50
-        guidance_scale = 4.0 if guidance_scale is None else guidance_scale
-
-        pipe = self._ensure_pipe()
-        prompt_embeds = self._remote_text_encoder(prompt)
-
-        call_kwargs = {
-            "prompt_embeds": prompt_embeds,
-            "generator": torch.Generator(self.device).manual_seed(42),
-            "num_inference_steps": num_inference_steps,
-            "guidance_scale": guidance_scale,
-        }
-        if image_bytes:
-            call_kwargs["image"] = [self._prepare_image(image_bytes)]
-
-        try:
-            with torch.inference_mode():
-                image = pipe(**call_kwargs).images[0]
-        except RuntimeError as err:
-            message = str(err).lower()
-            if "out of memory" in message:
-                logger.warning("FLUX generation OOM (%s); clearing cache and re-raising", message)
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            raise
-
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
-        return buffer
-
-
-class ImageGeneratorManager:
-    def __init__(self):
-        self._zimage = ZImageGenerator()
-        self._flux = FluxGenerator()
-
-    def generate(
-        self,
-        *,
-        model: ModelName,
-        prompt: str,
-        image_bytes: Optional[bytes] = None,
-        **kwargs,
-    ) -> io.BytesIO:
-        if model == ModelName.FLUX:
-            return self._flux.generate(prompt=prompt, image_bytes=image_bytes, **kwargs)
-        return self._zimage.generate(prompt=prompt, **kwargs)
-
-
-# Instância reutilizável
-generator = ImageGeneratorManager()
+generator = GGUFFluxGenerator()

@@ -5,103 +5,17 @@ import os
 import time
 from typing import List, Literal, Optional
 
-import requests
-import torch
-from diffusers import Flux2Pipeline
-from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from huggingface_hub import get_token
-from PIL import Image
 from pydantic import BaseModel
 
+from app.services.generator import generator
 from app.services.storage import storage
 
-# -------------------------------------------------------------------
-# ENV & LOGGING
-# -------------------------------------------------------------------
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("flux2-server")
+logger = logging.getLogger("zimage-gguf")
 
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
-FLUX2_REPO = os.getenv("FLUX2_REPO", "black-forest-labs/FLUX.2-dev")
-
-DEVICE = os.getenv("DEVICE") or (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
-)
-TORCH_DTYPE = (
-    torch.float16
-    if DEVICE.startswith("cuda")
-    else torch.float16
-    if DEVICE == "mps"
-    else torch.float32
-)
-
-
-def _resolve_token() -> str:
-    token = HF_TOKEN or get_token()
-    if not token:
-        raise RuntimeError("HF_TOKEN/HUGGINGFACE_TOKEN não definido.")
-    return token
-
-
-# -------------------------------------------------------------------
-# REMOTE TEXT ENCODER (recomendado pela Black Forest Labs)
-# -------------------------------------------------------------------
-def remote_text_encoder(prompts: List[str]) -> torch.Tensor:
-    """
-    Usa o endpoint remoto oficial do FLUX.2 para gerar prompt_embeds
-    a partir de textos. Retorna um tensor no device configurado.
-    """
-    if isinstance(prompts, str):
-        prompts = [prompts]
-
-    headers = {
-        "Authorization": f"Bearer {_resolve_token()}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        response = requests.post(
-            "https://remote-text-encoder-flux-2.huggingface.co/predict",
-            json={"prompt": prompts},
-            headers=headers,
-            timeout=60,
-        )
-        response.raise_for_status()
-    except Exception as exc:
-        logger.error("Erro no remote_text_encoder: %s", exc)
-        raise HTTPException(status_code=502, detail="Falha no encoder remoto.")
-
-    prompt_embeds = torch.load(io.BytesIO(response.content))
-    return prompt_embeds.to(DEVICE)
-
-
-# -------------------------------------------------------------------
-# CARREGANDO O FLUX.2 DEV
-# -------------------------------------------------------------------
-logger.info("Carregando pipeline FLUX.2 a partir de %s em %s...", FLUX2_REPO, DEVICE)
-pipe: Flux2Pipeline = Flux2Pipeline.from_pretrained(
-    FLUX2_REPO,
-    text_encoder=None,  # usamos encoder remoto
-    torch_dtype=TORCH_DTYPE,
-    token=_resolve_token(),
-).to(DEVICE)
-
-pipe.enable_model_cpu_offload()
-pipe.vae.enable_slicing()
-pipe.vae.enable_tiling()
-logger.info("Pipeline FLUX.2 carregado.")
-
-# -------------------------------------------------------------------
-# FASTAPI APP
-# -------------------------------------------------------------------
-app = FastAPI(title="FLUX2 Image Server", version="1.0.0")
+app = FastAPI(title="ZZ-GGUF Flux2", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -112,9 +26,6 @@ app.add_middleware(
 )
 
 
-# -------------------------------------------------------------------
-# MODELOS
-# -------------------------------------------------------------------
 class ImageGenerationRequest(BaseModel):
     prompt: str
     n: int = 1
@@ -136,58 +47,37 @@ class ImageGenerationResponse(BaseModel):
     data: List[ImageObject]
 
 
-def pil_to_bytes(pil_image: Image.Image) -> io.BytesIO:
-    buf = io.BytesIO()
-    pil_image.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
-
-
-# -------------------------------------------------------------------
-# ENDPOINTS
-# -------------------------------------------------------------------
 @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
 def generate_image(body: ImageGenerationRequest):
-    """
-    Geração de imagem a partir de texto com FLUX.2-dev quantizado.
-    Estilo OpenAI Images API.
-    """
-    logger.info("[txt2img] prompt='%s' n=%s", body.prompt, body.n)
+    logger.info("[gguf txt2img] prompt='%s' n=%s height=%s width=%s", body.prompt, body.n, body.height, body.width)
 
     if body.n < 1 or body.n > 8:
         raise HTTPException(status_code=400, detail="n deve estar entre 1 e 8")
 
-    prompt_embeds = remote_text_encoder([body.prompt] * body.n)
-
-    generator = None
-    if body.seed is not None:
-        generator = torch.Generator(device=DEVICE).manual_seed(body.seed)
-
-    with torch.inference_mode():
-        out = pipe(
-            prompt_embeds=prompt_embeds,
-            generator=generator,
-            num_inference_steps=body.num_inference_steps,
-            guidance_scale=body.guidance_scale,
+    try:
+        images = generator.generate(
+            prompt=body.prompt,
+            n=body.n,
             height=body.height,
             width=body.width,
+            num_inference_steps=body.num_inference_steps,
+            guidance_scale=body.guidance_scale,
+            seed=body.seed,
         )
-        images = out.images
+    except Exception as exc:
+        logger.error("Falha ao gerar imagem: %s", exc)
+        raise HTTPException(status_code=500, detail="Erro no runtime GGUF")
 
     data: List[ImageObject] = []
-    for img in images:
-        buf = pil_to_bytes(img)
+    for image_bytes in images:
         if body.response_format == "url":
-            url = storage.upload_image(buf, content_type="image/png")
+            url = storage.upload_image(io.BytesIO(image_bytes), content_type="image/png")
             data.append(ImageObject(url=url))
         else:
-            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-            data.append(ImageObject(b64_json=b64))
+            encoded = base64.b64encode(image_bytes).decode("utf-8")
+            data.append(ImageObject(b64_json=encoded))
 
-    return ImageGenerationResponse(
-        created=int(time.time()),
-        data=data,
-    )
+    return ImageGenerationResponse(created=int(time.time()), data=data)
 
 
 @app.post("/v1/images/edits", response_model=ImageGenerationResponse)
@@ -200,53 +90,42 @@ async def edit_image(
     seed: Optional[int] = Form(None),
     response_format: Literal["url", "b64_json"] = Form("url"),
 ):
-    """
-    Edição de imagem (image-to-image) com FLUX.2-dev.
-    """
-    logger.info("[img2img] prompt='%s' strength=%s file=%s", prompt, strength, image.filename)
+    logger.info("[gguf img2img] prompt='%s' strength=%s file=%s", prompt, strength, image.filename)
 
     try:
         contents = await image.read()
-        init_image = Image.open(io.BytesIO(contents)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Não foi possível ler a imagem enviada.")
 
-    prompt_embeds = remote_text_encoder([prompt])
-
-    generator = None
-    if seed is not None:
-        generator = torch.Generator(device=DEVICE).manual_seed(seed)
-
-    with torch.inference_mode():
-        out = pipe(
-            prompt_embeds=prompt_embeds,
-            image=init_image,
-            strength=strength,
-            generator=generator,
+    try:
+        generated = generator.generate(
+            prompt=prompt,
+            n=1,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
+            seed=seed,
+            image_bytes=contents,
+            strength=strength,
         )
-        result_image = out.images[0]
+    except Exception as exc:
+        logger.error("Falha no runtime GGUF para edições: %s", exc)
+        raise HTTPException(status_code=500, detail="Erro no runtime GGUF")
 
-    buf = pil_to_bytes(result_image)
+    image_bytes = generated[0]
 
-    data: List[ImageObject] = []
     if response_format == "url":
-        url = storage.upload_image(buf, content_type="image/png")
-        data.append(ImageObject(url=url))
+        url = storage.upload_image(io.BytesIO(image_bytes), content_type="image/png")
+        data = [ImageObject(url=url)]
     else:
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        data.append(ImageObject(b64_json=b64))
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        data = [ImageObject(b64_json=encoded)]
 
-    return ImageGenerationResponse(
-        created=int(time.time()),
-        data=data,
-    )
+    return ImageGenerationResponse(created=int(time.time()), data=data)
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": FLUX2_REPO, "device": DEVICE}
+    return {"status": "ok", "runtime": "gguf", "device": os.getenv("FLUX_GGUF_DEVICE")}
 
 
 if __name__ == "__main__":
