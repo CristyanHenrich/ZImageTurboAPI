@@ -22,6 +22,9 @@ class MinioStorage:
     _retry_delay = 2.0
 
     def __init__(self):
+        use_minio_flag = os.getenv("MINIO_ENABLED", "true").strip().lower()
+        self.use_minio = use_minio_flag not in ("0", "false", "no")
+
         self.minio_url = os.getenv("MINIO_URL")
         api_source = (
             os.getenv("MINIO_API_URL")
@@ -36,7 +39,7 @@ class MinioStorage:
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
         self._bucket_checked = False
         self.local_image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "images/generated"))
-        self._minio_enabled = bool(self.endpoint and self.access_key and self.secret_key)
+        self._minio_enabled = self.use_minio and bool(self.endpoint and self.access_key and self.secret_key)
         secure = self.secure
 
         if self._minio_enabled and not MinioStorage._client:
