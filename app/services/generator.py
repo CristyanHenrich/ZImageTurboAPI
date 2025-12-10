@@ -7,6 +7,8 @@ import torch
 from diffusers import QwenImageEditPlusPipeline, QwenImagePipeline
 from PIL import Image
 
+from app.services.model_setup import ensure_quantized_model
+
 logger = logging.getLogger(__name__)
 
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
@@ -23,12 +25,36 @@ def _image_to_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def _env_enabled(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes")
+
+
 class QwenTextGenerator:
     def __init__(self):
-        model_id = os.getenv("QWEN_TEXT_MODEL_ID", "nunchaku-tech/nunchaku-qwen-image")
+        base_repo = os.getenv("QWEN_TEXT_MODEL_ID", "Qwen/Qwen-Image")
         dtype_name = os.getenv("QWEN_TEXT_TORCH_DTYPE", "bfloat16").lower()
         torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
+
+        quant_repo = os.getenv("QWEN_TEXT_QUANT_REPO", "nunchaku-tech/nunchaku-qwen-image").strip() or None
+        quant_file = os.getenv("QWEN_TEXT_QUANT_FILE", "svdq-int4_r32-qwen-image.safetensors").strip() or None
+        model_cache = os.getenv("MODEL_CACHE_DIR", "quantized_models")
+        force_quant = _env_enabled("QWEN_QUANT_FORCE")
+        target_name = os.getenv("QWEN_TEXT_QUANT_TARGET")
+        model_source = base_repo
+        if quant_repo and quant_file:
+            quant_path = ensure_quantized_model(
+                base_repo=base_repo,
+                quant_repo=quant_repo,
+                quant_filename=quant_file,
+                cache_dir=model_cache,
+                target_name=target_name,
+                force=force_quant,
+                token=token,
+            )
+            model_source = str(quant_path)
+        else:
+            logger.info("Usando modelo base %s sem quantizacao extra", base_repo)
 
         self.device = (
             os.getenv("QWEN_TEXT_DEVICE")
@@ -39,7 +65,7 @@ class QwenTextGenerator:
         self.compile_pipeline = os.getenv("QWEN_TEXT_COMPILE", "false").strip().lower() in ("true", "1", "yes")
 
         self.pipeline = QwenImagePipeline.from_pretrained(
-            model_id,
+            model_source,
             torch_dtype=torch_dtype,
             token=token,
             low_cpu_mem_usage=True,
@@ -98,13 +124,32 @@ class QwenTextGenerator:
 
 class QwenEditGenerator:
     def __init__(self):
-        model_id = os.getenv("QWEN_EDIT_MODEL_ID", "nunchaku-tech/nunchaku-qwen-image-edit")
+        base_repo = os.getenv("QWEN_EDIT_MODEL_ID", "Qwen/Qwen-Image-Edit")
         dtype_name = os.getenv("QWEN_EDIT_TORCH_DTYPE", "bfloat16").lower()
         torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
+        quant_repo = os.getenv("QWEN_EDIT_QUANT_REPO", "nunchaku-tech/nunchaku-qwen-image-edit").strip() or None
+        quant_file = os.getenv("QWEN_EDIT_QUANT_FILE", "svdq-int4_r32-qwen-image-edit.safetensors").strip() or None
+        model_cache = os.getenv("MODEL_CACHE_DIR", "quantized_models")
+        force_quant = _env_enabled("QWEN_QUANT_FORCE")
+        target_name = os.getenv("QWEN_EDIT_QUANT_TARGET")
+        model_source = base_repo
+        if quant_repo and quant_file:
+            edit_path = ensure_quantized_model(
+                base_repo=base_repo,
+                quant_repo=quant_repo,
+                quant_filename=quant_file,
+                cache_dir=model_cache,
+                target_name=target_name,
+                force=force_quant,
+                token=token,
+            )
+            model_source = str(edit_path)
+        else:
+            logger.info("Usando modelo de edição base %s sem quantizacao extra", base_repo)
 
         self.pipeline = QwenImageEditPlusPipeline.from_pretrained(
-            model_id,
+            model_source,
             torch_dtype=torch_dtype,
             token=token,
         )
