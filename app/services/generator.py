@@ -142,7 +142,6 @@ class QwenEditGenerator:
         true_cfg_scale: float,
         negative_prompt: str,
         seed: Optional[int],
-        strength: float,
         n: int = 1,
     ) -> List[bytes]:
         results: List[bytes] = []
@@ -156,7 +155,6 @@ class QwenEditGenerator:
                     true_cfg_scale=true_cfg_scale,
                     negative_prompt=negative_prompt,
                     num_inference_steps=num_inference_steps,
-                    strength=strength,
                 )
             results.append(_image_to_bytes(output.images[0]))
         return results

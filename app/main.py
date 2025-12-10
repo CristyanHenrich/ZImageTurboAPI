@@ -93,7 +93,6 @@ async def edit_image(
     true_cfg_scale: float = Form(4.0),
     negative_prompt: str = Form(""),
     num_inference_steps: int = Form(20),
-    strength: float = Form(0.8),
     n: int = Form(1),
     seed: Optional[int] = Form(None),
     response_format: Literal["url", "b64_json"] = Form("url"),
@@ -116,9 +115,8 @@ async def edit_image(
             true_cfg_scale=true_cfg_scale,
             negative_prompt=negative_prompt,
             seed=seed,
-            strength=strength,
-            n=n,
-        )
+        n=n,
+    )
     except Exception as exc:
         logger.error("Erro no Qwen edit: %s", exc)
         raise HTTPException(status_code=500, detail="Erro ao editar imagem.")
