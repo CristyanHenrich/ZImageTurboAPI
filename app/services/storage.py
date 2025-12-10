@@ -4,6 +4,8 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from minio import Minio
@@ -20,15 +22,22 @@ class MinioStorage:
     _retry_delay = 2.0
 
     def __init__(self):
-        self.endpoint = self._extract_endpoint(os.getenv("MINIO_URL"))
+        self.minio_url = os.getenv("MINIO_URL")
+        api_source = (
+            os.getenv("MINIO_API_URL")
+            or os.getenv("MINIO_ENDPOINT")
+            or self.minio_url
+        )
+        self.endpoint, self.secure = self._parse_endpoint(api_source)
+        self.public_url = self.minio_url or api_source
+
         self.access_key = os.getenv("MINIO_ACCESS_KEY")
         self.secret_key = os.getenv("MINIO_SECRET_KEY")
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
         self._bucket_checked = False
         self.local_image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "images/generated"))
         self._minio_enabled = bool(self.endpoint and self.access_key and self.secret_key)
-
-        secure = str(self.endpoint).startswith("https")
+        secure = self.secure
 
         if self._minio_enabled and not MinioStorage._client:
             MinioStorage._client = Minio(
@@ -40,10 +49,15 @@ class MinioStorage:
             MinioStorage._bucket = self.bucket_name
 
     @staticmethod
-    def _extract_endpoint(url: str) -> str:
+    def _parse_endpoint(url: Optional[str]) -> tuple[str, bool]:
         if not url:
-            return ""
-        return url.replace("https://", "").replace("http://", "")
+            return "", False
+
+        normalized = url if "://" in url else f"https://{url}"
+        parsed = urlparse(normalized)
+        host = parsed.netloc
+        secure = parsed.scheme == "https"
+        return host, secure
 
     def _ensure_bucket_exists(self):
         if not self._minio_enabled or not MinioStorage._client:
@@ -67,10 +81,11 @@ class MinioStorage:
         """
         Monta a URL pública final, no mesmo padrão do seu código anterior.
         """
-        base_url = os.getenv("MINIO_URL")
+        base_url = self.public_url
 
-        if not base_url:
-            base_url = f"https://{self.endpoint}"
+        if not base_url and self.endpoint:
+            proto = "https" if self.secure else "http"
+            base_url = f"{proto}://{self.endpoint}"
 
         # Ex.: https://minio.playground.dev.br/genius/arquivo.png
         return f"{base_url}/{self.bucket_name}/{filename}"
