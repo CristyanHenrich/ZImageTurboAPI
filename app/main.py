@@ -3,19 +3,21 @@ import io
 import logging
 import os
 import time
-from typing import List, Literal, Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from PIL import Image
 
 from app.services.generator import generator
 from app.services.storage import storage
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("zimage-gguf")
+logger = logging.getLogger("qwen-service")
 
-app = FastAPI(title="ZZ-GGUF Flux2", version="1.0.0")
+app = FastAPI(title="Qwen Edit API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,17 +28,6 @@ app.add_middleware(
 )
 
 
-class ImageGenerationRequest(BaseModel):
-    prompt: str
-    n: int = 1
-    height: int = 1024
-    width: int = 1024
-    num_inference_steps: int = 28
-    guidance_scale: float = 4.0
-    seed: Optional[int] = None
-    response_format: Literal["url", "b64_json"] = "url"
-
-
 class ImageObject(BaseModel):
     url: Optional[str] = None
     b64_json: Optional[str] = None
@@ -44,88 +35,69 @@ class ImageObject(BaseModel):
 
 class ImageGenerationResponse(BaseModel):
     created: int
-    data: List[ImageObject]
+    prompt: str
+    data: list[ImageObject]
 
 
-@app.post("/v1/images/generations", response_model=ImageGenerationResponse)
-def generate_image(body: ImageGenerationRequest):
-    logger.info("[gguf txt2img] prompt='%s' n=%s height=%s width=%s", body.prompt, body.n, body.height, body.width)
-
-    if body.n < 1 or body.n > 8:
-        raise HTTPException(status_code=400, detail="n deve estar entre 1 e 8")
-
-    try:
-        images = generator.generate(
-            prompt=body.prompt,
-            n=body.n,
-            height=body.height,
-            width=body.width,
-            num_inference_steps=body.num_inference_steps,
-            guidance_scale=body.guidance_scale,
-            seed=body.seed,
-        )
-    except Exception as exc:
-        logger.error("Falha ao gerar imagem: %s", exc)
-        raise HTTPException(status_code=500, detail="Erro no runtime GGUF")
-
-    data: List[ImageObject] = []
-    for image_bytes in images:
-        if body.response_format == "url":
-            url = storage.upload_image(io.BytesIO(image_bytes), content_type="image/png")
-            data.append(ImageObject(url=url))
-        else:
-            encoded = base64.b64encode(image_bytes).decode("utf-8")
-            data.append(ImageObject(b64_json=encoded))
-
-    return ImageGenerationResponse(created=int(time.time()), data=data)
-
-
-@app.post("/v1/images/edits", response_model=ImageGenerationResponse)
-async def edit_image(
+@app.post("/generate", response_model=ImageGenerationResponse)
+async def generate_image(
     prompt: str = Form(...),
     image: UploadFile = File(...),
-    strength: float = Form(0.8),
-    num_inference_steps: int = Form(28),
-    guidance_scale: float = Form(4.0),
+    true_cfg_scale: float = Form(4.0),
+    negative_prompt: str = Form(""),
+    num_inference_steps: int = Form(20),
+    n: int = Form(1),
     seed: Optional[int] = Form(None),
     response_format: Literal["url", "b64_json"] = Form("url"),
 ):
-    logger.info("[gguf img2img] prompt='%s' strength=%s file=%s", prompt, strength, image.filename)
+    if n < 1 or n > 4:
+        raise HTTPException(status_code=400, detail="n precisa estar entre 1 e 4")
 
     try:
         contents = await image.read()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Não foi possível ler a imagem enviada.")
+        init_image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as exc:
+        logger.error("Falha ao abrir imagem enviada: %s", exc)
+        raise HTTPException(status_code=400, detail="Não foi possível processar a imagem.")
 
     try:
-        generated = generator.generate(
+        generated_images = generator.generate(
             prompt=prompt,
-            n=1,
+            image=init_image,
             num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
+            true_cfg_scale=true_cfg_scale,
+            negative_prompt=negative_prompt,
             seed=seed,
-            image_bytes=contents,
-            strength=strength,
+            n=n,
         )
     except Exception as exc:
-        logger.error("Falha no runtime GGUF para edições: %s", exc)
-        raise HTTPException(status_code=500, detail="Erro no runtime GGUF")
+        logger.error("Erro no runtime do modelo: %s", exc)
+        raise HTTPException(status_code=500, detail="Falha ao gerar imagem.")
 
-    image_bytes = generated[0]
+    data = []
+    for image_bytes in generated_images:
+        if response_format == "url":
+            url = storage.upload_image(io.BytesIO(image_bytes), content_type="image/png")
+            data.append(ImageObject(url=url))
+        else:
+            data.append(ImageObject(b64_json=base64.b64encode(image_bytes).decode("utf-8")))
 
-    if response_format == "url":
-        url = storage.upload_image(io.BytesIO(image_bytes), content_type="image/png")
-        data = [ImageObject(url=url)]
-    else:
-        encoded = base64.b64encode(image_bytes).decode("utf-8")
-        data = [ImageObject(b64_json=encoded)]
-
-    return ImageGenerationResponse(created=int(time.time()), data=data)
+    return ImageGenerationResponse(
+        created=int(time.time()),
+        prompt=prompt,
+        data=data,
+    )
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "runtime": "gguf", "device": os.getenv("FLUX_GGUF_DEVICE")}
+    return JSONResponse(
+        {
+            "status": "ok",
+            "model": os.getenv("QWEN_MODEL_ID", "ovedrive/Qwen-Image-Edit-2509-4bit"),
+            "device": os.getenv("QWEN_DEVICE"),
+        }
+    )
 
 
 if __name__ == "__main__":
