@@ -34,17 +34,33 @@ class ZImageGenerator:
             os.getenv("ZIMAGE_DEVICE")
             or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         )
+        self.attention_backend = os.getenv("ZIMAGE_ATTENTION", "_flash_3")
+        self.enable_progress = os.getenv("ZIMAGE_PROGRESS", "false").strip().lower() in ("true", "1", "yes")
+        self.compile_pipeline = os.getenv("ZIMAGE_COMPILE", "false").strip().lower() in ("true", "1", "yes")
+
         self.pipeline = ZImagePipeline.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
             token=token,
             low_cpu_mem_usage=True,
+            torch_compile=self.compile_pipeline,
         )
+
+        self.pipeline.set_progress_bar_config(disable=not self.enable_progress)
+        try:
+            self.pipeline.set_attention_backend(self.attention_backend)
+        except Exception:
+            logger.debug("attention backend %s not supported", self.attention_backend)
 
         if self.device == "cpu":
             self.pipeline.enable_model_cpu_offload()
         else:
-            self.pipeline.to(self.device)
+            try:
+                self.pipeline.to(self.device)
+            except RuntimeError as exc:
+                logger.warning("Erro ao mover ZImage para %s (%s); forcando offload.", self.device, exc)
+                self.pipeline.enable_model_cpu_offload()
+                self.device = "cpu"
 
     def _build_generator(self, seed: Optional[int]) -> Optional[torch.Generator]:
         if seed is None:
