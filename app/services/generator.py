@@ -4,7 +4,7 @@ import os
 from typing import List, Optional
 
 import torch
-from diffusers import QwenImageEditPlusPipeline, ZImagePipeline
+from diffusers import QwenImageEditPlusPipeline, QwenImagePipeline
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -23,44 +23,46 @@ def _image_to_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-class ZImageGenerator:
+class QwenTextGenerator:
     def __init__(self):
-        model_id = os.getenv("ZIMAGE_MODEL_ID", "Tongyi-MAI/Z-Image-Turbo")
-        dtype_name = os.getenv("ZIMAGE_TORCH_DTYPE", "float16").lower()
-        torch_dtype = torch.float16 if dtype_name in ("float16", "fp16") else torch.float32
+        model_id = os.getenv("QWEN_TEXT_MODEL_ID", "Qwen/Qwen-Image")
+        dtype_name = os.getenv("QWEN_TEXT_TORCH_DTYPE", "bfloat16").lower()
+        torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
 
         self.device = (
-            os.getenv("ZIMAGE_DEVICE")
-            or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+            os.getenv("QWEN_TEXT_DEVICE")
+            or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        self.attention_backend = os.getenv("ZIMAGE_ATTENTION", "_flash_3")
-        self.enable_progress = os.getenv("ZIMAGE_PROGRESS", "false").strip().lower() in ("true", "1", "yes")
-        self.compile_pipeline = os.getenv("ZIMAGE_COMPILE", "false").strip().lower() in ("true", "1", "yes")
+        self.attention_backend = os.getenv("QWEN_TEXT_ATTENTION", "_flash_3")
+        self.enable_progress = os.getenv("QWEN_TEXT_PROGRESS", "false").strip().lower() in ("true", "1", "yes")
+        self.compile_pipeline = os.getenv("QWEN_TEXT_COMPILE", "false").strip().lower() in ("true", "1", "yes")
 
-        self.pipeline = ZImagePipeline.from_pretrained(
+        self.pipeline = QwenImagePipeline.from_pretrained(
             model_id,
             torch_dtype=torch_dtype,
             token=token,
             low_cpu_mem_usage=True,
             torch_compile=self.compile_pipeline,
         )
-
         self.pipeline.set_progress_bar_config(disable=not self.enable_progress)
         try:
             self.pipeline.set_attention_backend(self.attention_backend)
         except Exception:
-            logger.debug("attention backend %s not supported", self.attention_backend)
+            logger.debug("attention backend %s not supported for text pipeline", self.attention_backend)
 
+        self._move_pipeline()
+
+    def _move_pipeline(self):
         if self.device == "cpu":
             self.pipeline.enable_model_cpu_offload()
-        else:
-            try:
-                self.pipeline.to(self.device)
-            except RuntimeError as exc:
-                logger.warning("Erro ao mover ZImage para %s (%s); forcando offload.", self.device, exc)
-                self.pipeline.enable_model_cpu_offload()
-                self.device = "cpu"
+            return
+        try:
+            self.pipeline.to(self.device)
+        except RuntimeError as exc:
+            logger.warning("Erro ao mover text pipeline para %s (%s); ativando offload.", self.device, exc)
+            self.pipeline.enable_model_cpu_offload()
+            self.device = "cpu"
 
     def _build_generator(self, seed: Optional[int]) -> Optional[torch.Generator]:
         if seed is None:
@@ -79,25 +81,25 @@ class ZImageGenerator:
         n: int = 1,
     ) -> List[bytes]:
         results: List[bytes] = []
-        for attempt in range(n):
-            generator = self._build_generator(seed + attempt if seed is not None else None)
+        for idx in range(n):
+            generator = self._build_generator(seed + idx if seed is not None else None)
             with torch.inference_mode():
-                image = self.pipeline(
+                output = self.pipeline(
                     prompt=prompt,
                     height=height,
                     width=width,
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     generator=generator,
-                ).images[0]
-            results.append(_image_to_bytes(image))
+                )
+            results.append(_image_to_bytes(output.images[0]))
         return results
 
 
-class QwenPipelineGenerator:
+class QwenEditGenerator:
     def __init__(self):
-        model_id = os.getenv("QWEN_MODEL_ID", "ovedrive/Qwen-Image-Edit-2509-4bit")
-        dtype_name = os.getenv("QWEN_TORCH_DTYPE", "bfloat16").lower()
+        model_id = os.getenv("QWEN_EDIT_MODEL_ID", "Qwen/Qwen-Image-Edit")
+        dtype_name = os.getenv("QWEN_EDIT_TORCH_DTYPE", "bfloat16").lower()
         torch_dtype = torch.bfloat16 if dtype_name in ("bf16", "bfloat16") else torch.float16
         token = _resolve_token()
 
@@ -109,7 +111,7 @@ class QwenPipelineGenerator:
         self.pipeline.set_progress_bar_config(disable=True)
 
         preferred_device = (
-            os.getenv("QWEN_DEVICE")
+            os.getenv("QWEN_EDIT_DEVICE")
             or ("cuda" if torch.cuda.is_available() else "cpu")
         )
         self.device = preferred_device
@@ -122,7 +124,7 @@ class QwenPipelineGenerator:
         try:
             self.pipeline.to(self.device)
         except RuntimeError as exc:
-            logger.warning("Não foi possível mover pipeline para %s (%s), usando CPU.", self.device, exc)
+            logger.warning("Não foi possível mover edição para %s (%s), usando CPU.", self.device, exc)
             self.pipeline.enable_model_cpu_offload()
             self.device = "cpu"
 
@@ -160,5 +162,5 @@ class QwenPipelineGenerator:
         return results
 
 
-zimage_generator = ZImageGenerator()
-qwen_generator = QwenPipelineGenerator()
+text_generator = QwenTextGenerator()
+edit_generator = QwenEditGenerator()

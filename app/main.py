@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 
-from app.services.generator import qwen_generator, zimage_generator
+from app.services.generator import edit_generator, text_generator
 from app.services.storage import storage
 
 logging.basicConfig(level=logging.INFO)
@@ -70,7 +70,7 @@ def generate_image(body: TextGenerationRequest):
         raise HTTPException(status_code=400, detail="n deve estar entre 1 e 4")
 
     try:
-        images = zimage_generator.generate(
+        images = text_generator.generate(
             prompt=body.prompt,
             height=body.height,
             width=body.width,
@@ -109,7 +109,7 @@ async def edit_image(
         raise HTTPException(status_code=400, detail="Imagem inválida.")
 
     try:
-        images = qwen_generator.generate(
+        images = edit_generator.generate(
             prompt=prompt,
             image=init_image,
             num_inference_steps=num_inference_steps,
@@ -131,12 +131,12 @@ def health():
     return {
         "status": "ok",
         "models": {
-            "zimage": os.getenv("ZIMAGE_MODEL_ID", "Tongyi-MAI/Z-Image-Turbo"),
-            "qwen": os.getenv("QWEN_MODEL_ID", "ovedrive/Qwen-Image-Edit-2509-4bit"),
+            "qwen_text": os.getenv("QWEN_TEXT_MODEL_ID", "Qwen/Qwen-Image"),
+            "qwen_edit": os.getenv("QWEN_EDIT_MODEL_ID", "ovedrive/Qwen-Image-Edit-2509-4bit"),
         },
         "device": {
-            "zimage": os.getenv("ZIMAGE_DEVICE"),
-            "qwen": os.getenv("QWEN_DEVICE"),
+            "qwen_text": os.getenv("QWEN_TEXT_DEVICE"),
+            "qwen_edit": os.getenv("QWEN_EDIT_DEVICE"),
         },
     }
 
