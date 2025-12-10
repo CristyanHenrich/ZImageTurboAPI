@@ -26,9 +26,9 @@ class MinioStorage:
         self.bucket_name = os.getenv("MINIO_BUCKET", "genius")
         self._bucket_checked = False
         self.local_image_dir = Path(os.getenv("LOCAL_IMAGE_DIR", "images/generated"))
-        self._minio_enabled = bool(self.minio_url and self.access_key and self.secret_key)
+        self._minio_enabled = bool(self.endpoint and self.access_key and self.secret_key)
 
-        secure = str(self.minio_url).startswith("https")
+        secure = str(self.endpoint).startswith("https")
 
         if self._minio_enabled and not MinioStorage._client:
             MinioStorage._client = Minio(
