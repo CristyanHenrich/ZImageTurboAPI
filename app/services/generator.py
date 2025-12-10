@@ -11,7 +11,7 @@ from app.services.model_setup import ensure_quantized_model
 
 logger = logging.getLogger(__name__)
 
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 
 def _resolve_token() -> Optional[str]:
